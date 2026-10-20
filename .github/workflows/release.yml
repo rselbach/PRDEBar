@@ -1,0 +1,153 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: macos-15
+    timeout-minutes: 60
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_16.4.app/Contents/Developer
+      HOMEBREW_NO_AUTO_UPDATE: '1'
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Validate release tag
+        run: |
+          if [[ ! "${GITHUB_REF_NAME}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            printf '::error::Release tags must use vMAJOR.MINOR.PATCH.\n' >&2
+            exit 1
+          fi
+          printf 'APP_VERSION=%s\n' "${GITHUB_REF_NAME#v}" >> "${GITHUB_ENV}"
+          printf 'APP_BUILD_NUMBER=%s\n' "${GITHUB_RUN_NUMBER}" >> "${GITHUB_ENV}"
+
+      - name: Check out release
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install development tools
+        run: brew install just shellcheck
+
+      - name: Lint
+        run: just lint
+
+      - name: Test
+        run: just test
+
+      - name: Build universal app
+        run: bash scripts/package-app.sh release --arch arm64 --arch x86_64
+
+      - name: Import signing certificate
+        env:
+          MACOS_CERTIFICATE_P12_BASE64: ${{ secrets.MACOS_CERTIFICATE_P12_BASE64 }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+        run: |
+          keychain_path="${RUNNER_TEMP}/signing.keychain-db"
+          keychain_password="$(openssl rand -base64 32)"
+          printf '::add-mask::%s\n' "${keychain_password}"
+          security create-keychain -p "${keychain_password}" "${keychain_path}"
+          security set-keychain-settings -lut 21600 "${keychain_path}"
+          security unlock-keychain -p "${keychain_password}" "${keychain_path}"
+          printf '%s' "${MACOS_CERTIFICATE_P12_BASE64}" \
+            | base64 --decode \
+            | security import /dev/stdin -f pkcs12 -k "${keychain_path}" \
+                -P "${MACOS_CERTIFICATE_PASSWORD}" \
+                -T /usr/bin/codesign -T /usr/bin/security
+          security set-key-partition-list -S apple-tool:,apple:,codesign: \
+            -s -k "${keychain_password}" "${keychain_path}" >/dev/null
+          security list-keychains -d user -s "${keychain_path}" login.keychain-db
+
+      - name: Sign app
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+        run: bash scripts/sign-app.sh
+
+      - name: Verify app
+        run: |
+          for arch in arm64 x86_64; do
+            lipo .build/PRDEBar.app/Contents/MacOS/PRDEBar -verify_arch "${arch}"
+            lipo .build/PRDEBar.app/Contents/Frameworks/Sparkle.framework/Sparkle \
+              -verify_arch "${arch}"
+          done
+          plutil -lint .build/PRDEBar.app/Contents/Info.plist
+          codesign --verify --deep --strict .build/PRDEBar.app
+
+      - name: Notarize and staple app
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          ditto -c -k --sequesterRsrc --keepParent .build/PRDEBar.app \
+            .build/PRDEBar-notarization.zip
+          xcrun notarytool submit .build/PRDEBar-notarization.zip \
+            --apple-id "${APPLE_ID}" --team-id "${APPLE_TEAM_ID}" \
+            --password "${APPLE_APP_SPECIFIC_PASSWORD}" \
+            --wait --timeout 30m --output-format json \
+            > "${RUNNER_TEMP}/notarization.json"
+          if ! jq -e '.status == "Accepted"' \
+            "${RUNNER_TEMP}/notarization.json" >/dev/null; then
+            submission_id="$(jq -r '.id' "${RUNNER_TEMP}/notarization.json")"
+            xcrun notarytool log "${submission_id}" \
+              --apple-id "${APPLE_ID}" --team-id "${APPLE_TEAM_ID}" \
+              --password "${APPLE_APP_SPECIFIC_PASSWORD}"
+            exit 1
+          fi
+          xcrun stapler staple .build/PRDEBar.app
+          xcrun stapler validate .build/PRDEBar.app
+          spctl --assess --type execute --verbose=2 .build/PRDEBar.app
+
+      - name: Archive notarized app
+        run: |
+          mkdir -p .build/updates
+          ditto -c -k --sequesterRsrc --keepParent .build/PRDEBar.app \
+            ".build/updates/PRDEBar-${GITHUB_REF_NAME}-universal.zip"
+
+      - name: Generate signed update feed
+        env:
+          SPARKLE_EDDSA_PRIVATE_KEY: ${{ secrets.SPARKLE_EDDSA_PRIVATE_KEY }}
+        run: |
+          download_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}"
+          download_url+="/releases/download/${GITHUB_REF_NAME}/"
+          printf '%s' "${SPARKLE_EDDSA_PRIVATE_KEY}" \
+            | .build/artifacts/sparkle/Sparkle/bin/generate_appcast \
+                --ed-key-file - --maximum-deltas 0 \
+                --download-url-prefix "${download_url}" .build/updates
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if ! gh release view "${GITHUB_REF_NAME}" \
+            --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            gh release create "${GITHUB_REF_NAME}" \
+              --repo "${GITHUB_REPOSITORY}" --verify-tag --draft \
+              --title "PRDEBar ${GITHUB_REF_NAME}" --generate-notes
+          fi
+          gh release upload "${GITHUB_REF_NAME}" \
+            ".build/updates/PRDEBar-${GITHUB_REF_NAME}-universal.zip" \
+            .build/updates/appcast.xml \
+            --repo "${GITHUB_REPOSITORY}" --clobber
+          gh release edit "${GITHUB_REF_NAME}" \
+            --repo "${GITHUB_REPOSITORY}" --draft=false
+
+      - name: Clean up signing keychain
+        if: always()
+        run: |
+          if [[ -f "${RUNNER_TEMP}/signing.keychain-db" ]]; then
+            security delete-keychain "${RUNNER_TEMP}/signing.keychain-db"
+          fi
+          rm -f .build/PRDEBar-notarization.zip \
+            "${RUNNER_TEMP}/notarization.json"

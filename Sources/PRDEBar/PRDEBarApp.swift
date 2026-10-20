@@ -1,5 +1,7 @@
 import AppKit
+import Combine
 import PRDECore
+import Sparkle
 import SwiftUI
 
 @main
@@ -8,7 +10,7 @@ struct PRDEBarApp: App {
 
   var body: some Scene {
     MenuBarExtra {
-      ConnectionView(controller: delegate.controller)
+      ConnectionView(controller: delegate.controller, updater: delegate.updaterController.updater)
     } label: {
       StatusLabel(controller: delegate.controller)
     }
@@ -39,6 +41,8 @@ private struct StatusLabel: View {
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
   let controller = ConnectionController()
+  let updaterController = SPUStandardUpdaterController(
+    startingUpdater: true, updaterDelegate: nil, userDriverDelegate: nil)
 
   func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
     Task {
@@ -63,6 +67,8 @@ private typealias ViewState<Value> = SwiftUI.State<Value>
 
 private struct ConnectionView: View {
   @ObservedObject var controller: ConnectionController
+  let updater: SPUUpdater
+  @ViewState private var canCheckForUpdates = false
   @AppStorage("postgresPort") private var savedPort = "5433"
   @ViewState private var error: ConnectionFailure? = nil
   @ViewState private var portText = "5433"
@@ -113,10 +119,12 @@ private struct ConnectionView: View {
       Divider()
       ServicesView(postgresPort: validatedPort, error: $error)
       Divider()
+      Text("Stops local tunnels, not cloud resources.")
+        .font(.caption)
+        .foregroundStyle(.secondary)
       HStack {
-        Text("Stops local tunnels, not cloud resources.")
-          .font(.caption)
-          .foregroundStyle(.secondary)
+        Button("Check for Updates…") { updater.checkForUpdates() }
+          .disabled(!canCheckForUpdates)
         Spacer()
         Button("Quit") {
           NSApplication.shared.terminate(nil)
@@ -128,6 +136,7 @@ private struct ConnectionView: View {
     .frame(width: 360)
     .background(Color(nsColor: .windowBackgroundColor))
     .onAppear { portText = savedPort }
+    .onReceive(updater.publisher(for: \.canCheckForUpdates)) { canCheckForUpdates = $0 }
     .onReceive(controller.$failure) { failure in
       if let failure { error = failure }
     }
