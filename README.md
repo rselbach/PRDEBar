@@ -4,8 +4,8 @@ Start and stop your local PRDE connection from the macOS menu bar. PRDEBar does 
 
 ## Install and update the app
 
-1. Download the universal ZIP from the [latest release](https://github.com/rselbach/PRDEBar/releases/latest).
-2. Extract `PRDEBar.app` and move it into `/Applications` before opening it. Releases support Apple Silicon and Intel Macs running macOS 13 or later.
+1. Download the universal DMG from the [latest release](https://github.com/rselbach/PRDEBar/releases/latest).
+2. Open the DMG and drag `PRDEBar.app` onto the **Applications** shortcut before opening the app. Releases support Apple Silicon and Intel Macs running macOS 13 or later.
 3. Install `hcloud` and Doormat. Log in with your usual hcloud and Doormat session in Terminal before starting a connection.
 
 PRDEBar checks for updates automatically and downloads them in the background. Downloaded updates install when you quit. Choose **Check for Updates…** beside **Quit** to check manually or install an update now. An update restart uses the same connection cleanup as Quit, and the app starts stopped afterward.
@@ -26,7 +26,9 @@ Use macOS 13 or later with Swift 6 command-line tools. Tests use the toolchain's
 3. Open `.build/PRDEBar.app`, or run `just run`.
 4. Click **PRDE** in the menu bar to open PRDEBar. The label is green only while the connection is **Running** and red in all other states. The app starts stopped and has no Dock icon.
 
-The build creates an ad-hoc signed local app with bundle ID `dev.rselbach.PRDEBar`. It does not install anything into `/Applications`.
+The build creates an ad-hoc signed local app with bundle ID `dev.rselbach.PRDEBar`. It generates the app icon from `prde.jpg` using macOS's built-in image tools. It does not install anything into `/Applications`.
+
+After building the app, run `bash scripts/package-dmg.sh` to create `.build/PRDEBar.dmg` with an **Applications** shortcut. Local disk images are not notarized.
 
 ## Connect to PRDE
 
@@ -70,9 +72,9 @@ The app checks Nomad port `4646` and your selected PostgreSQL port before launch
    ```
 
 3. Check the **Release** workflow in GitHub Actions. It runs `just lint` and `just test`, then builds an optimized app for both Apple Silicon and Intel Macs. It signs the app with Developer ID, notarizes it with Apple, and staples the notarization ticket before publishing.
-4. Download `PRDEBar-v0.1.0-universal.zip` from the GitHub Release. The app version comes from the tag, and its build number comes from the workflow run number. A rerun replaces the release assets.
+4. Download `PRDEBar-v0.1.0-universal.dmg` from the GitHub Release. The app version comes from the tag, and its build number comes from the workflow run number. A rerun replaces the release assets.
 
-The workflow signs Sparkle's nested helpers before signing the app. After notarization and stapling, it generates a signed `appcast.xml` with Sparkle's bundled tools. It uploads the ZIP and feed before publishing the release. Installed apps read the feed at `https://github.com/rselbach/PRDEBar/releases/latest/download/appcast.xml`, so no separate update server or GitHub Pages setup is required.
+The workflow signs Sparkle's nested helpers before signing the app. It packages the stapled app into a signed DMG, then notarizes and staples the DMG too. A separate ZIP of the stapled app remains available for Sparkle updates. Sparkle's bundled tools generate a signed `appcast.xml` from that ZIP. The workflow uploads the DMG, ZIP, and feed before publishing the release. Installed apps read the feed at `https://github.com/rselbach/PRDEBar/releases/latest/download/appcast.xml`, so no separate update server or GitHub Pages setup is required.
 
 The workflow requires the repository secrets `APPLE_ID`, `APPLE_APP_SPECIFIC_PASSWORD`, `APPLE_TEAM_ID`, `APPLE_SIGNING_IDENTITY`, `MACOS_CERTIFICATE_P12_BASE64`, `MACOS_CERTIFICATE_PASSWORD`, and `SPARKLE_EDDSA_PRIVATE_KEY`. It imports the signing certificate into a temporary keychain and removes the keychain after the run. Local builds from `just build` remain ad-hoc signed.
 

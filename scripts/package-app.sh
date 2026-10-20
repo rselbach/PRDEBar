@@ -12,6 +12,8 @@ main() {
   local app_path=".build/PRDEBar.app"
   local executable="${app_path}/Contents/MacOS/PRDEBar"
   local sparkle_path=".build/artifacts/sparkle/Sparkle/Sparkle.xcframework"
+  local iconset_path=".build/PRDEBar.iconset"
+  local size
 
   swift build -c "${configuration}" --product PRDEBar "${@:2}"
   bin_path="$(swift build -c "${configuration}" --show-bin-path "${@:2}")"
@@ -38,6 +40,16 @@ main() {
     "${app_path}/Contents/Frameworks/Sparkle.framework"
   cp .build/artifacts/sparkle/Sparkle/LICENSE \
     "${app_path}/Contents/Resources/Sparkle-LICENSE"
+  mkdir -p "${iconset_path}"
+  for size in 16 32 128 256 512; do
+    sips -z "${size}" "${size}" prde.jpg --setProperty format png \
+      --out "${iconset_path}/icon_${size}x${size}.png" >/dev/null
+    sips -z "$((size * 2))" "$((size * 2))" prde.jpg \
+      --setProperty format png \
+      --out "${iconset_path}/icon_${size}x${size}@2x.png" >/dev/null
+  done
+  iconutil --convert icns "${iconset_path}" \
+    --output "${app_path}/Contents/Resources/PRDEBar.icns"
   cp Resources/Info.plist "${app_path}/Contents/Info.plist"
   /usr/libexec/PlistBuddy \
     -c "Add :CFBundleShortVersionString string ${version}" \

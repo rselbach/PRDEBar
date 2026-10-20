@@ -15,7 +15,7 @@ concurrency:
 jobs:
   release:
     runs-on: macos-15
-    timeout-minutes: 60
+    timeout-minutes: 90
     env:
       DEVELOPER_DIR: /Applications/Xcode_16.4.app/Contents/Developer
       HOMEBREW_NO_AUTO_UPDATE: '1'
@@ -82,6 +82,7 @@ jobs:
               -verify_arch "${arch}"
           done
           plutil -lint .build/PRDEBar.app/Contents/Info.plist
+          test -s .build/PRDEBar.app/Contents/Resources/PRDEBar.icns
           codesign --verify --deep --strict .build/PRDEBar.app
 
       - name: Notarize and staple app
@@ -92,22 +93,24 @@ jobs:
         run: |
           ditto -c -k --sequesterRsrc --keepParent .build/PRDEBar.app \
             .build/PRDEBar-notarization.zip
-          xcrun notarytool submit .build/PRDEBar-notarization.zip \
-            --apple-id "${APPLE_ID}" --team-id "${APPLE_TEAM_ID}" \
-            --password "${APPLE_APP_SPECIFIC_PASSWORD}" \
-            --wait --timeout 30m --output-format json \
-            > "${RUNNER_TEMP}/notarization.json"
-          if ! jq -e '.status == "Accepted"' \
-            "${RUNNER_TEMP}/notarization.json" >/dev/null; then
-            submission_id="$(jq -r '.id' "${RUNNER_TEMP}/notarization.json")"
-            xcrun notarytool log "${submission_id}" \
-              --apple-id "${APPLE_ID}" --team-id "${APPLE_TEAM_ID}" \
-              --password "${APPLE_APP_SPECIFIC_PASSWORD}"
-            exit 1
-          fi
-          xcrun stapler staple .build/PRDEBar.app
-          xcrun stapler validate .build/PRDEBar.app
+          bash scripts/notarize.sh .build/PRDEBar-notarization.zip \
+            .build/PRDEBar.app
           spctl --assess --type execute --verbose=2 .build/PRDEBar.app
+
+      - name: Build, sign, and notarize disk image
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          dmg_path=".build/PRDEBar-${GITHUB_REF_NAME}-universal.dmg"
+          bash scripts/package-dmg.sh "${dmg_path}"
+          codesign --sign "${APPLE_SIGNING_IDENTITY}" --timestamp "${dmg_path}"
+          codesign --verify --strict "${dmg_path}"
+          bash scripts/notarize.sh "${dmg_path}"
+          spctl --assess --type open --context context:primary-signature \
+            --verbose=2 "${dmg_path}"
 
       - name: Archive notarized app
         run: |
@@ -137,6 +140,7 @@ jobs:
               --title "PRDEBar ${GITHUB_REF_NAME}" --generate-notes
           fi
           gh release upload "${GITHUB_REF_NAME}" \
+            ".build/PRDEBar-${GITHUB_REF_NAME}-universal.dmg" \
             ".build/updates/PRDEBar-${GITHUB_REF_NAME}-universal.zip" \
             .build/updates/appcast.xml \
             --repo "${GITHUB_REPOSITORY}" --clobber
@@ -149,5 +153,4 @@ jobs:
           if [[ -f "${RUNNER_TEMP}/signing.keychain-db" ]]; then
             security delete-keychain "${RUNNER_TEMP}/signing.keychain-db"
           fi
-          rm -f .build/PRDEBar-notarization.zip \
-            "${RUNNER_TEMP}/notarization.json"
+          rm -f .build/PRDEBar-notarization.zip

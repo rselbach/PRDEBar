@@ -8,6 +8,8 @@
   <string>PRDEBar</string>
   <key>CFBundleExecutable</key>
   <string>PRDEBar</string>
+  <key>CFBundleIconFile</key>
+  <string>PRDEBar.icns</string>
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>LSMinimumSystemVersion</key>
