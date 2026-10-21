@@ -64,6 +64,8 @@ int main(int argc, char **argv) {
       if (kill(leader, SIGTERM) == -1) return 10;
       return 24;
     }
+    snprintf(path, sizeof(path), "%s/unresponsive-%s", getenv("PRDE_TEST_DIRECTORY"), role);
+    int unresponsive = access(path, F_OK) == 0;
     if (!(event.revents & POLLIN)) continue;
     int client = accept(fd, NULL, NULL);
     if (client == -1) continue;
@@ -73,7 +75,7 @@ int main(int argc, char **argv) {
     if (setsockopt(client, SOL_SOCKET, SO_NOSIGPIPE, &yes, sizeof(yes)) == -1) return 13;
     char request[4096];
     ssize_t count = recv(client, request, sizeof(request), 0);
-    if (count > 0) {
+    if (count > 0 && !unresponsive) {
       const char *response = proxy
           ? "HTTP/1.1 200 OK\r\nContent-Length: 16\r\nConnection: close\r\n\r\n\"127.0.0.1:4647\""
           : "N";

@@ -39,7 +39,7 @@ public final class ConnectionController: ObservableObject {
         try await establish(port: port)
         try Task.checkCancellation()
         state = .running
-        beginMonitoring()
+        beginMonitoring(port: port)
       } catch {
         do {
           try await cleanUp()
@@ -65,13 +65,15 @@ public final class ConnectionController: ObservableObject {
     }
     guard state != .stopped else { return }
     state = .stopping
-    monitor?.cancel()
+    let pendingMonitor = monitor
+    pendingMonitor?.cancel()
     monitor = nil
     let pendingStartup = startup
     pendingStartup?.cancel()
     let task = Task {
-      // Startup owns its rollback. Wait before touching the same children.
+      // Startup and reconnection own their rollback. Wait before touching the same children.
       if let pendingStartup { _ = await pendingStartup.result }
+      if let pendingMonitor { await pendingMonitor.value }
       try await cleanUp()
       state = .stopped
     }
@@ -168,25 +170,45 @@ public final class ConnectionController: ObservableObject {
     }
   }
 
-  private func beginMonitoring() {
+  private func beginMonitoring(port: LocalPort) {
     monitor = Task {
-      do {
-        while !Task.isCancelled {
-          try checkChildren()
-          try await Task.sleep(for: .milliseconds(250))
-        }
-      } catch is CancellationError {
-        return
-      } catch {
-        logger.error("An owned PRDE command exited unexpectedly. Cleaning up the local connection.")
-        var message = error.localizedDescription
+      var retryDelay: Duration = .seconds(1)
+      while !Task.isCancelled {
         do {
-          try await stop()
+          if state == .reconnecting {
+            try await Task.sleep(for: retryDelay)
+            try await establish(port: port)
+            try Task.checkCancellation()
+            state = .running
+            retryDelay = .seconds(1)
+          }
+          try checkChildren()
+          let proxyReady = await Self.nomadReady(port: configuration.proxyPort)
+          let postgresReady = await Task.detached { prde_postgres_ready(port.value) == 1 }.value
+          try Task.checkCancellation()
+          try checkChildren()
+          guard proxyReady && postgresReady else {
+            throw ConnectionFailure("The local PRDE connection is no longer responding.")
+          }
+          try await Task.sleep(for: .seconds(2))
+        } catch is CancellationError {
+          return
         } catch {
-          logger.error("Local PRDE cleanup failed.")
-          message += " Cleanup also failed. \(error.localizedDescription)"
+          guard !Task.isCancelled else { return }
+          logger.notice("PRDE connection interrupted; reconnecting. \(error.localizedDescription)")
+          if state == .reconnecting { retryDelay = min(retryDelay * 2, .seconds(30)) }
+          state = .reconnecting
+          do {
+            try await cleanUp()
+          } catch let cleanupError {
+            logger.error("Local PRDE cleanup failed during reconnection.")
+            state = .cleanupFailed
+            failure = ConnectionFailure(
+              "\(error.localizedDescription) Cleanup also failed. \(cleanupError.localizedDescription)"
+            )
+            return
+          }
         }
-        failure = ConnectionFailure(message)
       }
     }
   }

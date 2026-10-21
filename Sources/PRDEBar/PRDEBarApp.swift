@@ -23,7 +23,12 @@ private struct StatusLabel: View {
 
   var body: some View {
     let state = controller.state
-    let color: Color = state == .running ? .green : .red
+    let color: Color =
+      switch state {
+      case .running: .green
+      case .reconnecting: .orange
+      default: .red
+      }
     let status = "PRDE: \(state.rawValue)"
 
     Image(size: CGSize(width: 38, height: 18), label: Text(status)) { context in
@@ -78,7 +83,9 @@ private struct ConnectionView: View {
       HStack {
         Text("PRDEBar").font(.headline)
         Spacer()
-        if controller.state == .starting || controller.state == .stopping {
+        if controller.state == .starting || controller.state == .reconnecting
+          || controller.state == .stopping
+        {
           ProgressView().controlSize(.small)
         }
         if controller.state == .running {

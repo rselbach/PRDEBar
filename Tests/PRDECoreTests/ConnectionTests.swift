@@ -131,16 +131,83 @@ struct ConnectionTests {
     }
   }
 
-  @Test(arguments: ["proxy", "postgres"])
-  func unexpectedCommandExitCleansUpOther(_ role: String) async throws {
+  @Test(arguments: ["exit-proxy", "exit-postgres", "unresponsive-proxy", "unresponsive-postgres"])
+  func interruptedConnectionReconnectsSilently(_ outageName: String) async throws {
     try await withFixture { fixture in
       try await fixture.controller.start(port: fixture.port)
       let pids = try fixture.recordedPIDs()
-      try Data().write(to: URL(fileURLWithPath: fixture.path("exit-\(role)")))
-      try await eventually { fixture.controller.failure != nil }
-      #expect(fixture.controller.state == .stopped)
-      #expect(fixture.controller.failure?.message.contains("exited with") == true)
+      let outage = URL(fileURLWithPath: fixture.path(outageName))
+      try Data().write(to: outage)
+      try await eventually { fixture.controller.state == .reconnecting }
+      #expect(fixture.controller.failure == nil)
       try await fixture.assertGone(pids)
+      try FileManager.default.removeItem(at: outage)
+      try await eventually { fixture.controller.state == .running }
+      #expect(fixture.controller.failure == nil)
+      #expect(try Set(fixture.recordedPIDs()).isDisjoint(with: pids))
+    }
+  }
+
+  @Test(arguments: ["exit-proxy", "unresponsive-proxy"])
+  func failedReconnectionKeepsRetryingSilently(_ outageName: String) async throws {
+    try await withFixture(timeout: .seconds(1)) { fixture in
+      try await fixture.controller.start(port: fixture.port)
+      let pids = try fixture.recordedPIDs()
+      let outage = URL(fileURLWithPath: fixture.path(outageName))
+      try Data().write(to: outage)
+      try await eventually { fixture.controller.state == .reconnecting }
+      try await fixture.assertGone(pids)
+      try await eventually {
+        let text = try String(contentsOfFile: fixture.path("proxy-descendant"), encoding: .utf8)
+        guard let pid = pid_t(text) else { return false }
+        return !pids.contains(pid)
+      }
+      try await fixture.assertGone(fixture.recordedPIDs())
+      #expect(fixture.controller.state == .reconnecting)
+      #expect(fixture.controller.failure == nil)
+      try FileManager.default.removeItem(at: outage)
+      try await eventually { fixture.controller.state == .running }
+      #expect(fixture.controller.failure == nil)
+    }
+  }
+
+  @Test func stopDuringRetryDelayCancelsReconnection() async throws {
+    try await withFixture { fixture in
+      try await fixture.controller.start(port: fixture.port)
+      let pids = try fixture.recordedPIDs()
+      try Data().write(to: URL(fileURLWithPath: fixture.path("exit-proxy")))
+      try await eventually { fixture.controller.state == .reconnecting }
+      try await fixture.assertGone(pids)
+      try await fixture.controller.stop()
+      try await Task.sleep(for: .milliseconds(1500))
+      #expect(fixture.controller.state == .stopped)
+      #expect(fixture.controller.failure == nil)
+      #expect(try Set(fixture.recordedPIDs()) == Set(pids))
+    }
+  }
+
+  @Test func stopDuringReconnectionReadinessCleansUpAndAllowsRestart() async throws {
+    try await withFixture { fixture in
+      try await fixture.controller.start(port: fixture.port)
+      let pids = try fixture.recordedPIDs()
+      let outage = URL(fileURLWithPath: fixture.path("unresponsive-postgres"))
+      try Data().write(to: outage)
+      try await eventually { fixture.controller.state == .reconnecting }
+      try await fixture.assertGone(pids)
+      try await eventually {
+        let text = try String(contentsOfFile: fixture.path("postgres-descendant"), encoding: .utf8)
+        guard let pid = pid_t(text) else { return false }
+        return !pids.contains(pid)
+      }
+      let retryPIDs = try fixture.recordedPIDs()
+      try await fixture.controller.stop()
+      #expect(fixture.controller.state == .stopped)
+      #expect(fixture.controller.failure == nil)
+      try await fixture.assertGone(retryPIDs)
+      try FileManager.default.removeItem(at: outage)
+      try await fixture.controller.start(port: fixture.port)
+      #expect(fixture.controller.state == .running)
+      #expect(fixture.controller.failure == nil)
     }
   }
 

@@ -25,6 +25,7 @@ public enum ConnectionState: String, Sendable {
   case stopped = "Stopped"
   case starting = "Starting"
   case running = "Running"
+  case reconnecting = "Reconnecting"
   case stopping = "Stopping"
   case cleanupFailed = "Cleanup needed"
 }
